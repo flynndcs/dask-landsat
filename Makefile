@@ -6,9 +6,7 @@ install:
 .PHONY: install
 
 format:
-	@echo "Black:"
 	@black .
-	@echo "Flake8:"
 	@flake8 .
 
 .PHONY: format 
