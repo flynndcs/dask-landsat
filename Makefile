@@ -12,8 +12,6 @@ format:
 .PHONY: format 
 
 run:
-	@echo "Running dask-landsat"
-	@echo "--------------------"
 	@python3 main.py
 
 .PHONY: run

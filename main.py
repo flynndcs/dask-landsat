@@ -1,7 +1,8 @@
 import dask
-import dask.delayed
 from dask.distributed import Client
 import requests
+import geopandas as gpd
+from typing import List
 
 # Landsat Collection 2 STAC API (stac-server)
 # https://landsatlook.usgs.gov/stac-server/
@@ -21,65 +22,57 @@ import requests
 
 
 class DaskLandsat:
-    LANDSAT_STAC_API_ROOT = "https://landsatlook.usgs.gov/stac-server"
-    COLLECTIONS_ROUTE = "collections"
-    ITEMS_ROUTE = "items"
+    STAC_ROOT = "https://landsatlook.usgs.gov/stac-server"
+    COLLECTIONS = "collections"
+    ITEMS = "items"
     SEPARATOR = "/"
 
     def _get(self, url):
         return requests.get(url).json()
 
-    def _get_collection_ids(self):
+    def _get_collection_ids(self) -> List[str]:
         """
         Returns an array of collection ids.
         """
-        response = self._get(
-            self.SEPARATOR.join([self.LANDSAT_STAC_API_ROOT, self.COLLECTIONS_ROUTE])
-        )
+        response = self._get(self.SEPARATOR.join([self.STAC_ROOT, self.COLLECTIONS]))
 
         return [collection["id"] for collection in response["collections"]]
 
     @dask.delayed
-    def _get_collection_metadata(self, id):
+    def _get_collection_items(self, id: str) -> dict:
         """
-        Returns a Delayed of a collection's metadata (title for now).
-        """
-        response = self._get(
-            self.SEPARATOR.join(
-                [self.LANDSAT_STAC_API_ROOT, self.COLLECTIONS_ROUTE, id]
-            )
-        )
-        return response["title"]
-
-    @dask.delayed
-    def _get_collection_items(self, id):
-        """
-        Get a Delayed of the first 10 items from the {id} collection
+        Returns a Delayed dictionary of the first 10 items' scene id and area from the collection 
         """
         response = self._get(
             self.SEPARATOR.join(
                 [
-                    self.LANDSAT_STAC_API_ROOT,
-                    self.COLLECTIONS_ROUTE,
+                    self.STAC_ROOT,
+                    self.COLLECTIONS,
                     id,
-                    self.ITEMS_ROUTE,
+                    self.ITEMS,
                 ]
             )
         )
-        return [item["id"] for item in response["features"]]
 
-    def __call__(self):
-        # 1. Get all collection ids, cannot parallelize
+        gdf = gpd.GeoDataFrame.from_features(response)
+
+        if "landsat:scene_id" not in gdf:
+            return {}
+        else:
+            return {
+                f"{key}_{id}": value
+                for key, value in zip(gdf["landsat:scene_id"], gdf.area)
+            }
+
+    def __call__(self) -> dict:
         collection_ids = self._get_collection_ids()
-        
-        # 2. Get metadata and items for each collection, can parallelize
-        collections = []
-        for id in collection_ids:
-            collections.append(
-                {self._get_collection_metadata(id): self._get_collection_items(id)}
-            )
+        collection_items_dicts = dask.compute(*[self._get_collection_items(id) for id in collection_ids])
 
-        return dask.compute(*collections)
+        return {
+            key: value
+            for dict in collection_items_dicts 
+            for key, value in dict.items()
+        }
 
 
 def run():
