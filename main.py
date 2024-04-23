@@ -4,23 +4,6 @@ import requests
 import geopandas as gpd
 from typing import List, Tuple
 
-# Landsat Collection 2 STAC API (stac-server)
-# https://landsatlook.usgs.gov/stac-server/
-#
-#   Collections
-#       Level-2 UTM Surface Reflectance (SR)
-#           Metadata
-#           Items
-#               LC_0{45789}...
-#               Metadata
-#               Assets (data)
-#                   Thumbnail image/jpeg
-#                   Browse image/jpeg
-#                   B1-7 vnd.stac.geotiff; cloud-optimized=true
-#                   ...
-#               ...
-#       ...
-
 
 class DaskLandsat:
     STAC_ROOT = "https://landsatlook.usgs.gov/stac-server"
@@ -28,47 +11,53 @@ class DaskLandsat:
     ITEMS = "items"
     SEPARATOR = "/"
 
-    def _get(self, url):
-        return requests.get(url).json()
+    def _build_url(self, path_segments):
+        return self.SEPARATOR.join(path_segments)
+
+    def _get(self, path_segments):
+        return requests.get(self._build_url(path_segments)).json()
 
     def _get_collection_ids(self) -> List[str]:
         """
         Returns an array of collection ids.
         """
-        response = self._get(self.SEPARATOR.join([self.STAC_ROOT, self.COLLECTIONS]))
+        response = self._get([self.STAC_ROOT, self.COLLECTIONS])
 
         return [collection["id"] for collection in response["collections"]]
 
     @dask.delayed
-    def _get_collection_items(self, id: str) -> gpd.GeoDataFrame:
+    def _get_collection_items(self, id: str) -> Tuple[str, gpd.GeoDataFrame]:
         """
         Returns a Delayed GeoDataFrame of the first 10 items' scene id and area from the collection
         """
         response = self._get(
-            self.SEPARATOR.join(
-                [
-                    self.STAC_ROOT,
-                    self.COLLECTIONS,
-                    id,
-                    self.ITEMS,
-                ]
-            )
+            [
+                self.STAC_ROOT,
+                self.COLLECTIONS,
+                id,
+                self.ITEMS,
+            ]
         )
 
-        return (id, gpd.GeoDataFrame.from_features(response))
+        gdf = gpd.GeoDataFrame.from_features(response)
+
+        return (id, gdf) if "landsat:scene_id" in gdf.columns else None
 
     @dask.delayed
-    def _get_area(self, id_df: Tuple[str, gpd.GeoDataFrame]) -> dict:
+    def _get_area_geometry_dict(
+        self, id_df: Tuple[str, gpd.GeoDataFrame] | None
+    ) -> dict:
         """
         Returns a Delayed dict of scene ids -> area for this dataframe
         """
+        if not id_df:
+            return {}
+
         id, gdf = id_df
 
         gdf.set_crs(4326, inplace=True)
 
-        # transform UTM geometries to meters
         epsg = gdf.head(1)["proj:epsg"].item()
-
         if not epsg:
             return {}
         else:
@@ -82,21 +71,15 @@ class DaskLandsat:
         }
 
     def __call__(self) -> dict:
-        collection_ids = self._get_collection_ids()
-        id_gdfs: List[gpd.GeoDataFrame] = dask.compute(
-            *[self._get_collection_items(id) for id in collection_ids]
-        )
-
-        collection_items_dicts = dask.compute(
-            *[
-                self._get_area(id_gdf)
-                for id_gdf in id_gdfs
-                if "landsat:scene_id" in id_gdf[1].columns
-            ]
-        )
+        collection_items_dicts = [
+            self._get_area_geometry_dict(self._get_collection_items(id))
+            for id in self._get_collection_ids()
+        ]
 
         return {
-            key: value for dict in collection_items_dicts for key, value in dict.items()
+            key: value
+            for dict in dask.compute(*collection_items_dicts)
+            for key, value in dict.items()
         }
 
 

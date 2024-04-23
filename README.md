@@ -2,7 +2,9 @@
 
 ## Description
 
-This downloads Landsat metadata and data via the Landsat STAC API and processes its items.
+This script fetches Landsat resources via the [USGS Landsat Collection-2 STAC API](https://landsatlook.usgs.gov/stac-server/), processes items from each of the appropriate collections (products), and returns the area and geometry for each item based on its projection.
+
+This script uses Dask to parallelize fetching and processing.
 
 ## Install 
 
