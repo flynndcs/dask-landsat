@@ -1,8 +1,9 @@
 import dask
+import dask.delayed
 from dask.distributed import Client
 import requests
 import geopandas as gpd
-from typing import List, Tuple
+import rasterio
 
 
 class DaskLandsat:
@@ -10,6 +11,8 @@ class DaskLandsat:
     COLLECTIONS = "collections"
     ITEMS = "items"
     SEPARATOR = "/"
+    COLLECTION_IDS = ["landsat-c2l2-sr", "landsat-c2l2-st", "landsat-c2l1"]
+    BANDS = ["red", "green", "blue"]
 
     def _build_url(self, path_segments):
         return self.SEPARATOR.join(path_segments)
@@ -17,20 +20,11 @@ class DaskLandsat:
     def _get(self, path_segments):
         return requests.get(self._build_url(path_segments)).json()
 
-    def _get_collection_ids(self) -> List[str]:
+    def _get_collection_items(self, id: str) -> dict:
         """
-        Returns an array of collection ids.
+        Returns the items response for the collection id
         """
-        response = self._get([self.STAC_ROOT, self.COLLECTIONS])
-
-        return [collection["id"] for collection in response["collections"]]
-
-    @dask.delayed
-    def _get_collection_items(self, id: str) -> Tuple[str, gpd.GeoDataFrame]:
-        """
-        Returns a Delayed GeoDataFrame of the first 10 items' scene id and area from the collection
-        """
-        response = self._get(
+        return self._get(
             [
                 self.STAC_ROOT,
                 self.COLLECTIONS,
@@ -39,48 +33,46 @@ class DaskLandsat:
             ]
         )
 
-        gdf = gpd.GeoDataFrame.from_features(response)
-
-        return (id, gdf) if "landsat:scene_id" in gdf.columns else None
-
-    @dask.delayed
-    def _get_area_geometry_dict(
-        self, id_df: Tuple[str, gpd.GeoDataFrame] | None
-    ) -> dict:
-        """
-        Returns a Delayed dict of scene ids -> area for this dataframe
-        """
-        if not id_df:
-            return {}
-
-        id, gdf = id_df
-
+    def _get_feature_area_geometry(self, feature):
+        gdf = gpd.GeoDataFrame.from_features([feature])
         gdf.set_crs(4326, inplace=True)
 
-        epsg = gdf.head(1)["proj:epsg"].item()
-        if not epsg:
-            return {}
-        else:
+        epsg = gdf["proj:epsg"].item()
+        if epsg:
             gdf.to_crs(epsg=epsg, inplace=True)
+        return {"area": gdf.area.item(), "geometry": gdf.geometry.to_wkt().item()}
 
-        return {
-            f"{key}_{id}": {"area": area, "geometry": geometry.wkt}
-            for key, area, geometry in zip(
-                gdf["landsat:scene_id"], gdf.area, gdf["geometry"]
+    def _read_asset_hrefs(self, feature):
+        results = []
+        # placeholder working COG, reading Landsat COGs results in:
+        # rasterio.errors.RasterioIOError: Line 51: Didn't find expected '=' for value of attribute 'async'.
+        with rasterio.open(
+            "https://download.osgeo.org/geotiff/samples/usgs/c41078a1.tif"
+        ) as src:
+            results.append(src.profile)
+        return results
+
+    def _process_items(self, items_response):
+        items = items_response["features"]
+        results = []
+        for feature in items:
+            results.append(
+                (
+                    self._get_feature_area_geometry(feature),
+                    self._read_asset_hrefs(feature),
+                )
             )
-        }
+        return results
 
     def __call__(self) -> dict:
-        collection_items_dicts = [
-            self._get_area_geometry_dict(self._get_collection_items(id))
-            for id in self._get_collection_ids()
+        results = [
+            dask.delayed(self._process_items)(
+                dask.delayed(self._get_collection_items)(id)
+            )
+            for id in self.COLLECTION_IDS
         ]
 
-        return {
-            key: value
-            for dict in dask.compute(*collection_items_dicts)
-            for key, value in dict.items()
-        }
+        return dask.compute(*results)
 
 
 def run():
